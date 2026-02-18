@@ -10,28 +10,35 @@ const termio = @import("../termio.zig");
 const WRITE_REQ_PREALLOC = std.math.pow(usize, 2, 5);
 
 /// The kinds of backends.
-pub const Kind = enum { exec };
+pub const Kind = enum { exec, pipe };
 
 /// Configuration for the various backend types.
 pub const Config = union(Kind) {
     /// Exec uses posix exec to run a command with a pty.
     exec: termio.Exec.Config,
+
+    /// Pipe uses OS pipes for I/O, allowing an external process
+    /// (e.g. an SSH client) to provide terminal data.
+    pipe: termio.Pipe.Config,
 };
 
 /// Backend implementations. A backend is responsible for owning the pty
 /// behavior and providing read/write capabilities.
 pub const Backend = union(Kind) {
     exec: termio.Exec,
+    pipe: termio.Pipe,
 
     pub fn deinit(self: *Backend) void {
         switch (self.*) {
             .exec => |*exec| exec.deinit(),
+            .pipe => |*p| p.deinit(),
         }
     }
 
     pub fn initTerminal(self: *Backend, t: *terminal.Terminal) void {
         switch (self.*) {
             .exec => |*exec| exec.initTerminal(t),
+            .pipe => |*p| p.initTerminal(t),
         }
     }
 
@@ -43,12 +50,14 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.threadEnter(alloc, io, td),
+            .pipe => |*p| try p.threadEnter(alloc, io, td),
         }
     }
 
     pub fn threadExit(self: *Backend, td: *termio.Termio.ThreadData) void {
         switch (self.*) {
             .exec => |*exec| exec.threadExit(td),
+            .pipe => |*p| p.threadExit(td),
         }
     }
 
@@ -59,6 +68,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.focusGained(td, focused),
+            .pipe => |*p| try p.focusGained(td, focused),
         }
     }
 
@@ -69,6 +79,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.resize(grid_size, screen_size),
+            .pipe => |*p| try p.resize(grid_size, screen_size),
         }
     }
 
@@ -81,6 +92,7 @@ pub const Backend = union(Kind) {
     ) !void {
         switch (self.*) {
             .exec => |*exec| try exec.queueWrite(alloc, td, data, linefeed),
+            .pipe => |*p| try p.queueWrite(alloc, td, data, linefeed),
         }
     }
 
@@ -98,6 +110,8 @@ pub const Backend = union(Kind) {
                 exit_code,
                 runtime_ms,
             ),
+            // Pipe backend has no child process, so this is a no-op.
+            .pipe => {},
         }
     }
 };
@@ -105,10 +119,12 @@ pub const Backend = union(Kind) {
 /// Termio thread data. See termio.ThreadData for docs.
 pub const ThreadData = union(Kind) {
     exec: termio.Exec.ThreadData,
+    pipe: termio.Pipe.ThreadData,
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         switch (self.*) {
             .exec => |*exec| exec.deinit(alloc),
+            .pipe => |*p| p.deinit(alloc),
         }
     }
 

@@ -462,6 +462,32 @@ pub fn init(
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
 ) !void {
+    return self.initInternal(alloc, config_original, app, rt_app, rt_surface, null);
+}
+
+/// Initialize a surface with a pre-constructed backend. This is used
+/// for backends like the pipe backend that don't need the exec setup.
+pub fn initWithBackend(
+    self: *Surface,
+    alloc: Allocator,
+    config_original: *const configpkg.Config,
+    app: *App,
+    rt_app: *apprt.runtime.App,
+    rt_surface: *apprt.runtime.Surface,
+    backend_override: termio.Backend,
+) !void {
+    return self.initInternal(alloc, config_original, app, rt_app, rt_surface, backend_override);
+}
+
+fn initInternal(
+    self: *Surface,
+    alloc: Allocator,
+    config_original: *const configpkg.Config,
+    app: *App,
+    rt_app: *apprt.runtime.App,
+    rt_surface: *apprt.runtime.Surface,
+    backend_override: ?termio.Backend,
+) !void {
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = config_original.changeConditionalState(
@@ -614,32 +640,38 @@ pub fn init(
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
     {
-        var env = rt_surface.defaultTermioEnv() catch |err| env: {
-            // If an error occurs, we don't want to block surface startup.
-            log.warn("error getting env map for surface err={}", .{err});
-            break :env internal_os.getEnvMap(alloc) catch
-                std.process.EnvMap.init(alloc);
+        const io_backend: termio.Backend = if (backend_override) |bo|
+            bo
+        else backend: {
+            var env = rt_surface.defaultTermioEnv() catch |err| env: {
+                // If an error occurs, we don't want to block surface startup.
+                log.warn("error getting env map for surface err={}", .{err});
+                break :env internal_os.getEnvMap(alloc) catch
+                    std.process.EnvMap.init(alloc);
+            };
+            errdefer env.deinit();
+
+            // don't leak GHOSTTY_LOG to any subprocesses
+            env.remove("GHOSTTY_LOG");
+
+            // Initialize our IO backend
+            var io_exec = try termio.Exec.init(alloc, .{
+                .command = command,
+                .env = env,
+                .env_override = config.env,
+                .shell_integration = config.@"shell-integration",
+                .shell_integration_features = config.@"shell-integration-features",
+                .cursor_blink = config.@"cursor-style-blink",
+                .working_directory = config.@"working-directory",
+                .resources_dir = global_state.resources_dir.host(),
+                .term = config.term,
+                .rt_pre_exec_info = .init(config),
+                .rt_post_fork_info = .init(config),
+            });
+            errdefer io_exec.deinit();
+
+            break :backend .{ .exec = io_exec };
         };
-        errdefer env.deinit();
-
-        // don't leak GHOSTTY_LOG to any subprocesses
-        env.remove("GHOSTTY_LOG");
-
-        // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
-            .command = command,
-            .env = env,
-            .env_override = config.env,
-            .shell_integration = config.@"shell-integration",
-            .shell_integration_features = config.@"shell-integration-features",
-            .cursor_blink = config.@"cursor-style-blink",
-            .working_directory = config.@"working-directory",
-            .resources_dir = global_state.resources_dir.host(),
-            .term = config.term,
-            .rt_pre_exec_info = .init(config),
-            .rt_post_fork_info = .init(config),
-        });
-        errdefer io_exec.deinit();
 
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
@@ -649,7 +681,7 @@ pub fn init(
             .size = size,
             .full_config = config,
             .config = try termio.Termio.DerivedConfig.init(alloc, config),
-            .backend = .{ .exec = io_exec },
+            .backend = io_backend,
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = render_thread.wakeup,

@@ -1056,6 +1056,24 @@ ghostty_surface_config_s ghostty_surface_config_new();
 
 ghostty_surface_t ghostty_surface_new(ghostty_app_t,
                                       const ghostty_surface_config_s*);
+
+/// Callback type for resize notifications from the pipe backend.
+/// Parameters: columns, rows, pixel_width, pixel_height, userdata
+typedef void (*ghostty_pipe_resize_cb)(uint16_t, uint16_t, uint16_t, uint16_t, void*);
+
+/// Create a new surface with a pipe backend (for embedding, e.g. SSH clients).
+/// The resize_cb is called when the terminal grid size changes.
+ghostty_surface_t ghostty_surface_new_pipe(ghostty_app_t,
+                                            const ghostty_surface_config_s*,
+                                            ghostty_pipe_resize_cb,
+                                            void* resize_cb_userdata);
+
+/// Get the pipe file descriptors for a pipe-backed surface.
+/// write_fd: the embedder writes terminal output data here (data to display).
+/// read_fd: the embedder reads terminal input data from here (user keyboard input).
+/// Returns true on success, false if the surface is not pipe-backed.
+bool ghostty_surface_pipe_fds(ghostty_surface_t, int* write_fd, int* read_fd);
+
 void ghostty_surface_free(ghostty_surface_t);
 void* ghostty_surface_userdata(ghostty_surface_t);
 ghostty_app_t ghostty_surface_app(ghostty_surface_t);

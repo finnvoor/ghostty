@@ -18,6 +18,7 @@ const terminal = @import("../terminal/main.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
+const termio = @import("../termio.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 
@@ -576,6 +577,50 @@ pub const Surface = struct {
         errdefer self.core_surface.deinit();
 
         // If our options requested a specific font-size, set that.
+        if (opts.font_size != 0) {
+            var font_size = self.core_surface.font_size;
+            font_size.points = opts.font_size;
+            try self.core_surface.setFontSize(font_size);
+        }
+    }
+
+    /// Initialize a surface with a pipe backend instead of the default exec
+    /// backend. This is used for environments where the terminal data comes
+    /// from an external source (e.g. SSH connection) rather than a local subprocess.
+    pub fn initWithPipeBackend(self: *Surface, app: *App, opts: Options, pipe_cfg: termio.Pipe.Config) !void {
+        self.* = .{
+            .app = app,
+            .platform = try .init(opts.platform_tag, opts.platform),
+            .userdata = opts.userdata,
+            .core_surface = undefined,
+            .content_scale = .{
+                .x = @floatCast(opts.scale_factor),
+                .y = @floatCast(opts.scale_factor),
+            },
+            .size = .{ .width = 800, .height = 600 },
+            .cursor_pos = .{ .x = -1, .y = -1 },
+        };
+
+        try app.core_app.addSurface(self);
+        errdefer app.core_app.deleteSurface(self);
+
+        var config = try apprt.surface.newConfig(app.core_app, &app.config, opts.context);
+        defer config.deinit();
+
+        // Create the pipe backend
+        var pipe_backend = try termio.Pipe.init(pipe_cfg);
+        errdefer pipe_backend.deinit();
+
+        try self.core_surface.initWithBackend(
+            app.core_app.alloc,
+            &config,
+            app.core_app,
+            app,
+            self,
+            .{ .pipe = pipe_backend },
+        );
+        errdefer self.core_surface.deinit();
+
         if (opts.font_size != 0) {
             var font_size = self.core_surface.font_size;
             font_size.points = opts.font_size;
@@ -1529,6 +1574,60 @@ pub const CAPI = struct {
         opts: *const apprt.Surface.Options,
     ) !*Surface {
         return try app.newSurface(opts.*);
+    }
+
+    /// Create a new surface with a pipe backend. The pipe backend uses OS
+    /// pipes for I/O instead of a pty + subprocess, which is useful for
+    /// embedding scenarios (e.g. SSH clients on iOS). The returned surface
+    /// has pipe file descriptors that can be retrieved with ghostty_surface_pipe_fds.
+    export fn ghostty_surface_new_pipe(
+        app: *App,
+        opts: *const apprt.Surface.Options,
+        resize_cb: ?*const fn (u16, u16, u16, u16, ?*anyopaque) callconv(.C) void,
+        resize_cb_userdata: ?*anyopaque,
+    ) ?*Surface {
+        return surface_new_pipe_(app, opts, resize_cb, resize_cb_userdata) catch |err| {
+            log.err("error initializing pipe surface err={}", .{err});
+            return null;
+        };
+    }
+
+    fn surface_new_pipe_(
+        app: *App,
+        opts: *const apprt.Surface.Options,
+        resize_cb: ?*const fn (u16, u16, u16, u16, ?*anyopaque) callconv(.C) void,
+        resize_cb_userdata: ?*anyopaque,
+    ) !*Surface {
+        var surface = try app.core_app.alloc.create(Surface);
+        errdefer app.core_app.alloc.destroy(surface);
+
+        try surface.initWithPipeBackend(app, opts.*, .{
+            .resize_cb = resize_cb,
+            .resize_cb_userdata = resize_cb_userdata,
+        });
+        errdefer surface.deinit();
+
+        return surface;
+    }
+
+    /// Get the pipe file descriptors for a pipe-backed surface.
+    /// Returns the fds that the embedder should use:
+    ///   - write_fd: write terminal output data here (data to display)
+    ///   - read_fd: read terminal input data from here (keyboard/user input)
+    /// Returns false if the surface does not use a pipe backend.
+    export fn ghostty_surface_pipe_fds(
+        surface: *Surface,
+        write_fd: *c_int,
+        read_fd: *c_int,
+    ) bool {
+        switch (surface.core_surface.io.backend) {
+            .pipe => |p| {
+                write_fd.* = p.output_write;
+                read_fd.* = p.input_read;
+                return true;
+            },
+            else => return false,
+        }
     }
 
     export fn ghostty_surface_free(ptr: *Surface) void {
