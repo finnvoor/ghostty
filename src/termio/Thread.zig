@@ -333,6 +333,12 @@ fn drainMailbox(
             .start_synchronized_output => self.startSynchronizedOutput(cb),
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
+            .pipe_read_small => |v| io.processOutput(v.data[0..v.len]),
+            .pipe_read_alloc => |v| {
+                defer v.alloc.free(v.data);
+                io.processOutput(v.data);
+            },
+            .pipe_closed => |v| io.pipeClosed(data, v.exit_code, v.runtime_ms),
             .write_small => |v| try io.queueWrite(
                 data,
                 v.data[0..v.len],

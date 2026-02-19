@@ -6,6 +6,7 @@ const CoreSurface = @import("../../Surface.zig");
 const ApprtApp = @import("App.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("class/surface.zig").Surface;
+const renderer = @import("../../renderer.zig");
 
 /// The GObject Surface
 surface: *Surface,
@@ -95,6 +96,26 @@ pub fn setClipboard(
 
 pub fn defaultTermioEnv(self: *Self) !std.process.EnvMap {
     return try self.surface.defaultTermioEnv();
+}
+
+pub fn termioPipeEnabled(self: *const Self) bool {
+    _ = self;
+    return false;
+}
+
+pub fn termioPipeWrite(self: *const Self, data: []const u8) void {
+    _ = self;
+    _ = data;
+}
+
+pub fn termioPipeResize(
+    self: *const Self,
+    grid_size: renderer.GridSize,
+    screen_size: renderer.ScreenSize,
+) void {
+    _ = self;
+    _ = grid_size;
+    _ = screen_size;
 }
 
 /// Redraw the inspector for our surface.

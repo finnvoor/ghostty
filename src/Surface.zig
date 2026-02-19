@@ -614,32 +614,64 @@ pub fn init(
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
     {
-        var env = rt_surface.defaultTermioEnv() catch |err| env: {
-            // If an error occurs, we don't want to block surface startup.
-            log.warn("error getting env map for surface err={}", .{err});
-            break :env internal_os.getEnvMap(alloc) catch
-                std.process.EnvMap.init(alloc);
+        var io_backend: termio.Backend = backend: {
+            if (rt_surface.termioPipeEnabled()) {
+                const callbacks = struct {
+                    fn write(userdata: ?*anyopaque, data: []const u8) void {
+                        const rt: *apprt.runtime.Surface = @ptrCast(@alignCast(
+                            userdata orelse return,
+                        ));
+                        rt.termioPipeWrite(data);
+                    }
+
+                    fn resize(
+                        userdata: ?*anyopaque,
+                        grid_size: rendererpkg.GridSize,
+                        screen_size: rendererpkg.ScreenSize,
+                    ) void {
+                        const rt: *apprt.runtime.Surface = @ptrCast(@alignCast(
+                            userdata orelse return,
+                        ));
+                        rt.termioPipeResize(grid_size, screen_size);
+                    }
+                };
+
+                break :backend .{ .pipe = termio.Pipe.init(.{
+                    .userdata = @ptrCast(rt_surface),
+                    .write = callbacks.write,
+                    .resize = callbacks.resize,
+                }) };
+            }
+
+            var env = rt_surface.defaultTermioEnv() catch |err| env: {
+                // If an error occurs, we don't want to block surface startup.
+                log.warn("error getting env map for surface err={}", .{err});
+                break :env internal_os.getEnvMap(alloc) catch
+                    std.process.EnvMap.init(alloc);
+            };
+            errdefer env.deinit();
+
+            // don't leak GHOSTTY_LOG to any subprocesses
+            env.remove("GHOSTTY_LOG");
+
+            var io_exec = try termio.Exec.init(alloc, .{
+                .command = command,
+                .env = env,
+                .env_override = config.env,
+                .shell_integration = config.@"shell-integration",
+                .shell_integration_features = config.@"shell-integration-features",
+                .cursor_blink = config.@"cursor-style-blink",
+                .working_directory = config.@"working-directory",
+                .resources_dir = global_state.resources_dir.host(),
+                .term = config.term,
+                .rt_pre_exec_info = .init(config),
+                .rt_post_fork_info = .init(config),
+            });
+            errdefer io_exec.deinit();
+
+            break :backend .{ .exec = io_exec };
         };
-        errdefer env.deinit();
-
-        // don't leak GHOSTTY_LOG to any subprocesses
-        env.remove("GHOSTTY_LOG");
-
-        // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
-            .command = command,
-            .env = env,
-            .env_override = config.env,
-            .shell_integration = config.@"shell-integration",
-            .shell_integration_features = config.@"shell-integration-features",
-            .cursor_blink = config.@"cursor-style-blink",
-            .working_directory = config.@"working-directory",
-            .resources_dir = global_state.resources_dir.host(),
-            .term = config.term,
-            .rt_pre_exec_info = .init(config),
-            .rt_post_fork_info = .init(config),
-        });
-        errdefer io_exec.deinit();
+        errdefer io_backend.deinit();
 
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
@@ -649,7 +681,7 @@ pub fn init(
             .size = size,
             .full_config = config,
             .config = try termio.Termio.DerivedConfig.init(alloc, config),
-            .backend = .{ .exec = io_exec },
+            .backend = io_backend,
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = render_thread.wakeup,
@@ -839,7 +871,7 @@ fn queueIo(
     msg: termio.Message,
     mutex: termio.Termio.MutexState,
 ) void {
-    // In readonly mode, we don't allow any writes through to the pty.
+    // In readonly mode, we don't allow any writes through to the backend.
     if (self.readonly) {
         switch (msg) {
             .write_small,
@@ -852,6 +884,30 @@ fn queueIo(
     }
 
     self.io.queueMessage(msg, mutex);
+}
+
+/// Feed output bytes into termio. This is primarily used by embedded
+/// environments that provide an external transport instead of a PTY.
+pub fn termioPipeRead(self: *Surface, data: []const u8) void {
+    const msg = termio.Message.pipeReadReq(self.alloc, data) catch |err| {
+        log.warn("error queueing pipe read err={}", .{err});
+        return;
+    };
+    self.queueIo(msg, .unlocked);
+}
+
+/// Notify termio that the external pipe transport closed.
+pub fn termioPipeClosed(
+    self: *Surface,
+    exit_code: u32,
+    runtime_ms: u64,
+) void {
+    self.queueIo(.{
+        .pipe_closed = .{
+            .exit_code = exit_code,
+            .runtime_ms = runtime_ms,
+        },
+    }, .unlocked);
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -1285,6 +1341,7 @@ fn childExitedAbnormally(
     // Build up our command for the error message
     const command = try std.mem.join(alloc, " ", switch (self.io.backend) {
         .exec => |*exec| exec.subprocess.args,
+        .pipe => &.{"<pipe>"},
     });
     const runtime_str = try std.fmt.allocPrint(alloc, "{d} ms", .{info.runtime_ms});
 

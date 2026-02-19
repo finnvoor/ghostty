@@ -17,7 +17,6 @@ pub const winsize = extern struct {
 
 pub const Pty = switch (builtin.os.tag) {
     .windows => WindowsPty,
-    .ios => NullPty,
     else => PosixPty,
 };
 
@@ -35,51 +34,6 @@ pub const Mode = packed struct {
     echo: bool = true,
 };
 
-// A pty implementation that does nothing.
-//
-// TODO: This should be removed. This is only temporary until we have
-// a termio that doesn't use a pty. This isn't used in any user-facing
-// artifacts, this is just a stopgap to get compilation to work on iOS.
-const NullPty = struct {
-    pub const Error = OpenError || GetModeError || SetSizeError || ChildPreExecError;
-
-    pub const Fd = posix.fd_t;
-
-    master: Fd,
-    slave: Fd,
-
-    pub const OpenError = error{};
-
-    pub fn open(size: winsize) OpenError!Pty {
-        _ = size;
-        return .{ .master = 0, .slave = 0 };
-    }
-
-    pub fn deinit(self: *Pty) void {
-        _ = self;
-    }
-
-    pub const GetModeError = error{GetModeFailed};
-
-    pub fn getMode(self: Pty) GetModeError!Mode {
-        _ = self;
-        return .{};
-    }
-
-    pub const SetSizeError = error{};
-
-    pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        _ = self;
-        _ = size;
-    }
-
-    pub const ChildPreExecError = error{};
-
-    pub fn childPreExec(self: Pty) ChildPreExecError!void {
-        _ = self;
-    }
-};
-
 /// Linux PTY creation and management. This is just a thin layer on top
 /// of Linux syscalls. The caller is responsible for detail-oriented handling
 /// of the returned file handles.
@@ -90,15 +44,14 @@ const PosixPty = struct {
 
     // https://github.com/ziglang/zig/issues/13277
     // Once above is fixed, use `c.TIOCSCTTY`
-    const TIOCSCTTY = if (builtin.os.tag == .macos) 536900705 else c.TIOCSCTTY;
-    const TIOCSWINSZ = if (builtin.os.tag == .macos) 2148037735 else c.TIOCSWINSZ;
-    const TIOCGWINSZ = if (builtin.os.tag == .macos) 1074295912 else c.TIOCGWINSZ;
+    const TIOCSCTTY = if (builtin.os.tag.isDarwin()) 536900705 else c.TIOCSCTTY;
+    const TIOCSWINSZ = if (builtin.os.tag.isDarwin()) 2148037735 else c.TIOCSWINSZ;
+    const TIOCGWINSZ = if (builtin.os.tag.isDarwin()) 1074295912 else c.TIOCGWINSZ;
     extern "c" fn setsid() std.c.pid_t;
-    const c = switch (builtin.os.tag) {
-        .macos => @cImport({
-            @cInclude("sys/ioctl.h"); // ioctl and constants
-            @cInclude("util.h"); // openpty()
-        }),
+    const c = if (builtin.os.tag.isDarwin()) @cImport({
+        @cInclude("sys/ioctl.h"); // ioctl and constants
+        @cInclude("util.h"); // openpty()
+    }) else switch (builtin.os.tag) {
         .freebsd => @cImport({
             @cInclude("termios.h"); // ioctl and constants
             @cInclude("libutil.h"); // openpty()

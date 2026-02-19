@@ -685,6 +685,27 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     self.processOutputLocked(buf);
 }
 
+/// Notify termio that an external pipe transport closed. This reuses the
+/// same child-exit surface path as exec-backed termio.
+pub fn pipeClosed(
+    self: *Termio,
+    td: *ThreadData,
+    exit_code: u32,
+    runtime_ms: u64,
+) void {
+    if (self.backend != .pipe) {
+        log.warn("pipe close message ignored for non-pipe backend", .{});
+        return;
+    }
+
+    _ = td.surface_mailbox.push(.{
+        .child_exited = .{
+            .exit_code = exit_code,
+            .runtime_ms = runtime_ms,
+        },
+    }, .{ .forever = {} });
+}
+
 /// Process output from readdata but the lock is already held.
 fn processOutputLocked(self: *Termio, buf: []const u8) void {
     // Schedule a render. We can call this first because we have the lock.

@@ -50,6 +50,20 @@ pub const App = struct {
         /// Callback called to handle an action.
         action: *const fn (*App, apprt.Target.C, apprt.Action.C) callconv(.c) bool,
 
+        /// Callback called when terminal input bytes should be written to an
+        /// external transport. This may be called from Ghostty's IO thread.
+        termio_pipe_write: ?*const fn (SurfaceUD, [*]const u8, usize) callconv(.c) void = null,
+
+        /// Callback called when the terminal size changes while using the
+        /// pipe termio backend. This may be called from Ghostty's IO thread.
+        termio_pipe_resize: ?*const fn (
+            SurfaceUD,
+            u16,
+            u16,
+            u32,
+            u32,
+        ) callconv(.c) void = null,
+
         /// Read the clipboard value. The return value must be preserved
         /// by the host until the next call. If there is no valid clipboard
         /// value then this should return null.
@@ -955,6 +969,38 @@ pub const Surface = struct {
         return env;
     }
 
+    pub fn termioPipeEnabled(self: *const Surface) bool {
+        return self.app.opts.termio_pipe_write != null;
+    }
+
+    pub fn termioPipeWrite(self: *const Surface, data: []const u8) void {
+        const cb = self.app.opts.termio_pipe_write orelse return;
+        cb(self.userdata, data.ptr, data.len);
+    }
+
+    pub fn termioPipeResize(
+        self: *const Surface,
+        grid_size: renderer.GridSize,
+        screen_size: renderer.ScreenSize,
+    ) void {
+        const cb = self.app.opts.termio_pipe_resize orelse return;
+        cb(
+            self.userdata,
+            @intCast(grid_size.columns),
+            @intCast(grid_size.rows),
+            screen_size.width,
+            screen_size.height,
+        );
+    }
+
+    pub fn termioPipeRead(self: *Surface, data: []const u8) void {
+        self.core_surface.termioPipeRead(data);
+    }
+
+    pub fn termioPipeClosed(self: *Surface, exit_code: u32, runtime_ms: u64) void {
+        self.core_surface.termioPipeClosed(exit_code, runtime_ms);
+    }
+
     /// The cursor position from the host directly is in screen coordinates but
     /// all our interface works in pixels.
     fn cursorPosToPixels(self: *const Surface, pos: apprt.CursorPos) !apprt.CursorPos {
@@ -1788,6 +1834,26 @@ pub const CAPI = struct {
         len: usize,
     ) void {
         surface.preeditCallback(if (len == 0) null else ptr[0..len]);
+    }
+
+    /// Feed output bytes into the terminal from an external transport when
+    /// using the pipe termio backend.
+    export fn ghostty_surface_pipe_read(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        if (len == 0) return;
+        surface.termioPipeRead(ptr[0..len]);
+    }
+
+    /// Notify the terminal that an external pipe transport has closed.
+    export fn ghostty_surface_pipe_closed(
+        surface: *Surface,
+        exit_code: u32,
+        runtime_ms: u64,
+    ) void {
+        surface.termioPipeClosed(exit_code, runtime_ms);
     }
 
     /// Returns true if the surface currently has mouse capturing

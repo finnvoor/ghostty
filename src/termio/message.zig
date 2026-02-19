@@ -73,6 +73,18 @@ pub const Message = union(enum) {
     /// The surface gained or lost focus.
     focused: bool,
 
+    /// Output bytes from an external transport while using the pipe backend.
+    pipe_read_small: WriteReq.Small,
+
+    /// Output bytes from an external transport while using the pipe backend.
+    pipe_read_alloc: WriteReq.Alloc,
+
+    /// Notify termio that an external transport has closed.
+    pipe_closed: struct {
+        exit_code: u32,
+        runtime_ms: u64,
+    },
+
     /// Write where the data fits in the union.
     write_small: WriteReq.Small,
 
@@ -90,6 +102,16 @@ pub const Message = union(enum) {
             .stable => unreachable,
             .small => |v| Message{ .write_small = v },
             .alloc => |v| Message{ .write_alloc = v },
+        };
+    }
+
+    /// Return a pipe read request for the given data. This will use
+    /// pipe_read_small if it fits or pipe_read_alloc otherwise.
+    pub fn pipeReadReq(alloc: Allocator, data: anytype) !Message {
+        return switch (try WriteReq.init(alloc, data)) {
+            .stable => unreachable,
+            .small => |v| Message{ .pipe_read_small = v },
+            .alloc => |v| Message{ .pipe_read_alloc = v },
         };
     }
 
