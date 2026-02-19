@@ -975,6 +975,14 @@ typedef void (*ghostty_runtime_write_clipboard_cb)(void*,
                                                    const ghostty_clipboard_content_s*,
                                                    size_t,
                                                    bool);
+typedef void (*ghostty_runtime_termio_pipe_write_cb)(void*,
+                                                     const uint8_t*,
+                                                     size_t);
+typedef void (*ghostty_runtime_termio_pipe_resize_cb)(void*,
+                                                      uint16_t,
+                                                      uint16_t,
+                                                      uint32_t,
+                                                      uint32_t);
 typedef void (*ghostty_runtime_close_surface_cb)(void*, bool);
 typedef bool (*ghostty_runtime_action_cb)(ghostty_app_t,
                                           ghostty_target_s,
@@ -985,6 +993,13 @@ typedef struct {
   bool supports_selection_clipboard;
   ghostty_runtime_wakeup_cb wakeup_cb;
   ghostty_runtime_action_cb action_cb;
+  // Called by Ghostty's IO thread when bytes should be written to an
+  // external transport. If this callback is set, Ghostty will use the
+  // pipe termio backend for surface IO. The userdata is the surface userdata.
+  ghostty_runtime_termio_pipe_write_cb termio_pipe_write_cb;
+  // Called by Ghostty's IO thread when terminal size changes while using
+  // the pipe termio backend. The userdata is the surface userdata.
+  ghostty_runtime_termio_pipe_resize_cb termio_pipe_resize_cb;
   ghostty_runtime_read_clipboard_cb read_clipboard_cb;
   ghostty_runtime_confirm_read_clipboard_cb confirm_read_clipboard_cb;
   ghostty_runtime_write_clipboard_cb write_clipboard_cb;
@@ -1089,6 +1104,22 @@ bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                     ghostty_binding_flags_e*);
 void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
 void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
+// Feed output bytes from an external transport into the terminal when using
+// the pipe termio backend.
+//
+// Returns true if the data was queued. Returns false if backpressure is active
+// and the caller should retry later, or if the surface is not configured to
+// use the pipe backend.
+//
+// The `data` pointer only needs to remain valid for the duration of this call.
+bool ghostty_surface_pipe_read(ghostty_surface_t, const uint8_t*, uintptr_t);
+// Notify Ghostty that the external transport has closed.
+//
+// `exit_code` and `runtime_ms` are surfaced through the same child-exit path
+// used by exec-backed termio.
+void ghostty_surface_pipe_closed(ghostty_surface_t, uint32_t, uint64_t);
+// Returns true if this surface is configured to use the pipe termio backend.
+bool ghostty_surface_pipe_enabled(ghostty_surface_t);
 bool ghostty_surface_mouse_captured(ghostty_surface_t);
 bool ghostty_surface_mouse_button(ghostty_surface_t,
                                   ghostty_input_mouse_state_e,

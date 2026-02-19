@@ -73,6 +73,18 @@ pub const Message = union(enum) {
     /// The surface gained or lost focus.
     focused: bool,
 
+    /// Output bytes from an external transport while using the pipe backend.
+    pipe_read_small: WriteReq.Small,
+
+    /// Output bytes from an external transport while using the pipe backend.
+    pipe_read_alloc: WriteReq.Alloc,
+
+    /// Notify termio that an external transport has closed.
+    pipe_closed: struct {
+        exit_code: u32,
+        runtime_ms: u64,
+    },
+
     /// Write where the data fits in the union.
     write_small: WriteReq.Small,
 
@@ -93,6 +105,27 @@ pub const Message = union(enum) {
         };
     }
 
+    /// Return a pipe read request for the given data. This will use
+    /// pipe_read_small if it fits or pipe_read_alloc otherwise.
+    pub fn pipeReadReq(alloc: Allocator, data: anytype) !Message {
+        return switch (try WriteReq.init(alloc, data)) {
+            .stable => unreachable,
+            .small => |v| Message{ .pipe_read_small = v },
+            .alloc => |v| Message{ .pipe_read_alloc = v },
+        };
+    }
+
+    /// Cleanup any memory owned by this message. This should be called when
+    /// an allocated message is dropped prior to being handled.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .change_config => |v| v.alloc.destroy(v.ptr),
+            .pipe_read_alloc => |v| v.alloc.free(v.data),
+            .write_alloc => |v| v.alloc.free(v.data),
+            else => {},
+        }
+    }
+
     /// The types of size reports that we support
     pub const SizeReport = enum {
         mode_2048,
@@ -110,4 +143,24 @@ test {
     // Ensure we don't grow our IO message size without explicitly wanting to.
     const testing = std.testing;
     try testing.expectEqual(@as(usize, 40), @sizeOf(Message));
+}
+
+test "pipeReadReq uses small then alloc variants" {
+    const testing = std.testing;
+
+    const small = try Message.pipeReadReq(testing.allocator, @as([]const u8, "small"));
+    try testing.expect(small == .pipe_read_small);
+
+    const big_data = try testing.allocator.alloc(u8, 64);
+    defer testing.allocator.free(big_data);
+    @memset(big_data, 'x');
+
+    const big = try Message.pipeReadReq(testing.allocator, big_data);
+    switch (big) {
+        .pipe_read_alloc => |v| {
+            try testing.expectEqual(big_data.len, v.data.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    big.deinit();
 }

@@ -409,6 +409,26 @@ pub fn queueMessage(
     self.mailbox.notify();
 }
 
+/// Send a message without blocking. Returns true if the message was queued.
+pub fn queueMessageTry(
+    self: *Termio,
+    msg: termio.Message,
+    mutex: MutexState,
+) bool {
+    var msg_owned = msg;
+    const queued = self.mailbox.sendTry(msg, switch (mutex) {
+        .locked => self.renderer_state.mutex,
+        .unlocked => null,
+    });
+    if (queued) {
+        self.mailbox.notify();
+    } else {
+        msg_owned.deinit();
+    }
+
+    return queued;
+}
+
 /// Queue a write directly to the pty.
 ///
 /// If you're using termio.Thread, this must ONLY be called from the
@@ -681,6 +701,27 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
     self.processOutputLocked(buf);
+}
+
+/// Notify termio that an external pipe transport closed. This reuses the
+/// same child-exit surface path as exec-backed termio.
+pub fn pipeClosed(
+    self: *Termio,
+    td: *ThreadData,
+    exit_code: u32,
+    runtime_ms: u64,
+) void {
+    if (self.backend != .pipe) {
+        log.warn("pipe close message ignored for non-pipe backend", .{});
+        return;
+    }
+
+    _ = td.surface_mailbox.push(.{
+        .child_exited = .{
+            .exit_code = exit_code,
+            .runtime_ms = runtime_ms,
+        },
+    }, .{ .forever = {} });
 }
 
 /// Process output from readdata but the lock is already held.

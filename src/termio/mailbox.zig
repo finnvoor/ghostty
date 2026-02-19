@@ -94,6 +94,33 @@ pub const Mailbox = union(enum) {
         }
     }
 
+    /// Sends the given message without blocking. Returns true if queued,
+    /// false if the queue is currently full.
+    ///
+    /// If the optional mutex is given, it must already be LOCKED. If the
+    /// queue is full, we'll unlock this mutex before a final non-blocking
+    /// retry so that the IO thread can make progress.
+    pub fn sendTry(
+        self: *Mailbox,
+        msg: termio.Message,
+        mutex: ?*std.Thread.Mutex,
+    ) bool {
+        return switch (self.*) {
+            .spsc => |*mb| send: {
+                if (mb.queue.push(msg, .{ .instant = {} }) > 0) break :send true;
+
+                mb.wakeup.notify() catch |err| {
+                    log.warn("failed to wake up writer err={}", .{err});
+                    break :send false;
+                };
+
+                if (mutex) |m| m.unlock();
+                defer if (mutex) |m| m.lock();
+                break :send mb.queue.push(msg, .{ .instant = {} }) > 0;
+            },
+        };
+    }
+
     /// Notify that there are new messages. This may be a noop depending
     /// on the writer type.
     pub fn notify(self: *Mailbox) void {
@@ -104,3 +131,14 @@ pub const Mailbox = union(enum) {
         }
     }
 };
+
+test "sendTry returns false when queue is full" {
+    var mb = try Mailbox.initSPSC(std.testing.allocator);
+    defer mb.deinit(std.testing.allocator);
+
+    for (0..64) |_| {
+        try std.testing.expect(mb.sendTry(.{ .crash = {} }, null));
+    }
+
+    try std.testing.expect(!mb.sendTry(.{ .crash = {} }, null));
+}
