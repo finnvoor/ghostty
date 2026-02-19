@@ -21,6 +21,13 @@ pub const Options = struct {
 step: *Step,
 output: LazyPath,
 
+fn getEnvOrNull(alloc: std.mem.Allocator, key: []const u8) ?[]const u8 {
+    return std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => @panic("failed to read environment variable"),
+    };
+}
+
 pub fn create(b: *std.Build, opts: Options) ?*MetallibStep {
     const sdk = switch (opts.target.result.os.tag) {
         .macos => "macosx",
@@ -55,7 +62,11 @@ pub fn create(b: *std.Build, opts: Options) ?*MetallibStep {
         b,
         b.fmt("metal {s}", .{opts.name}),
     );
-    run_ir.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metal", "-o" });
+    if (getEnvOrNull(b.allocator, "GHOSTTY_METAL_BIN")) |metal_bin| {
+        run_ir.addArgs(&.{ metal_bin, "-o" });
+    } else {
+        run_ir.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metal", "-o" });
+    }
     const output_ir = run_ir.addOutputFileArg(b.fmt("{s}.ir", .{opts.name}));
     run_ir.addArgs(&.{"-c"});
     for (opts.sources) |source| run_ir.addFileArg(source);
@@ -70,7 +81,11 @@ pub fn create(b: *std.Build, opts: Options) ?*MetallibStep {
         b,
         b.fmt("metallib {s}", .{opts.name}),
     );
-    run_lib.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metallib", "-o" });
+    if (getEnvOrNull(b.allocator, "GHOSTTY_METALLIB_BIN")) |metallib_bin| {
+        run_lib.addArgs(&.{ metallib_bin, "-o" });
+    } else {
+        run_lib.addArgs(&.{ "/usr/bin/xcrun", "-sdk", sdk, "metallib", "-o" });
+    }
     const output_lib = run_lib.addOutputFileArg(b.fmt("{s}.metallib", .{opts.name}));
     run_lib.addFileArg(output_ir);
     run_lib.step.dependOn(&run_ir.step);
